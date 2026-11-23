@@ -24,4 +24,3 @@ The core of this solution is a modular "Retrieve & Rank" pipeline, designed to s
 *   **torch**: The underlying deep learning framework for `sentence-transformers`.
 *   **ultralytics**: Used for object detection within PDFs to identify titles and section headers.
 *   **Pillow**: Used for image processing.
-*   **onnxruntime**: Used for optimized ONNX model inference.

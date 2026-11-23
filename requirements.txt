@@ -1,6 +1,3 @@
 PyMuPDF
 sentence-transformers
-torch
 ultralytics
-Pillow
-onnxruntime

@@ -1,80 +1,107 @@
 # Persona-Driven Document Intelligence (Challenge 1B)
 
-## Overview
-This solution addresses Challenge 1B of the Adobe India Hackathon, focusing on Persona-Driven Document Intelligence. The system acts as an intelligent document analyst, extracting and prioritizing the most relevant sections from a collection of documents based on a specific persona and their job-to-be-done. It integrates the outline generation (from Challenge 1A) directly into its processing pipeline, ensuring a seamless and self-contained execution.
+An intelligent document analysis and extraction system that prioritizes, semantically ranks, and extracts relevant document sections across collections of multi-page PDFs tailored to a specific **Persona** and **Job-to-be-Done**.
 
-## Approach
-The core of this solution is a modular "Retrieve & Rank" pipeline, designed to semantically understand user intent and extract highly relevant document sections. The pipeline consists of the following stages:
+Originally developed for **Adobe India Hackathon (Challenge 1B)**, this system integrates document layout analysis (YOLOv11 DocLayNet) with dense semantic search (Sentence Transformers MRL) and features both a **high-throughput containerized CLI pipeline** and an **interactive lightweight Web UI**.
 
-1.  **Integrated 1A Processing (Outline Generation)**: Before persona-driven analysis, the system first processes all input PDFs to extract their structured outlines (titles, H1, H2, H3 headings) using a YOLO-based model. This outline data is generated in-memory and used to define precise section boundaries within the documents.
-    **Optimization:** The YOLO model now processes all pages of a PDF in a single batch, significantly reducing inference time for multi-page documents.
+---
 
-2.  **Ingestion & Chunking**: PDFs are processed using `PyMuPDF` to extract text. The in-memory structured outlines are used to define precise section boundaries. Each identified section, along with its text content, document name, page number, and title, forms a "document chunk" in our corpus.
+## Interactive Web UI
 
-3.  **Query Formulation**: The user's high-level need, expressed through the `Persona` and `Job-to-be-Done`, is translated into a single, potent semantic query. This is achieved by concatenating the persona and job descriptions.
+The repository includes a self-contained, lightweight Web interface with zero frontend dependencies (pure HTML/CSS/JS served via Flask).
 
-4.  **Corpus & Query Encoding**: A pre-trained Sentence Transformer model (`tomaarsen/static-similarity-mrl-multilingual-v1`) is used to convert both the formulated query and every document chunk in the corpus into high-dimensional vector embeddings. This model is specifically chosen for its efficiency on CPU, small size, and suitability for asymmetric search tasks.
-    **Model Selection Rationale:** The `static-similarity-mrl-multilingual-v1` model is optimized for resource-constrained environments and uses static embeddings for faster performance, making it ideal for containerized deployments with limited computational resources.
+| Ranked Sections View | JSON Payload Inspector |
+| :---: | :---: |
+| ![Ranked Sections View](docs/screenshots/ranked_sections.png) | ![JSON Payload View](docs/screenshots/json_payload.png) |
 
-5.  **Retrieval & Ranking**: With the query and corpus represented as vectors in the same semantic space, a vector similarity search is performed using `sentence_transformers.util.semantic_search`. This function efficiently calculates the similarity between the query vector and all corpus vectors, retrieving the top-k most similar chunks and ranking them by their relevance score.
+---
 
-6.  **Output Generation**: The final stage assembles the processed information into the precise JSON structure required by the challenge specification. This includes `metadata`, `extracted_sections`, and `subsection_analysis` (document, page number, and the most relevant paragraph from the section).
+## Key Features
 
-## Models and Libraries Used
-*   **PyMuPDF (fitz)**: For efficient and accurate text extraction from PDF documents.
-*   **sentence-transformers**: The primary library for generating semantic embeddings. The specific model used is `tomaarsen/static-similarity-mrl-multilingual-v1` (≈ 430MB), chosen for resource-constrained environments and faster static embedding performance.
-*   **torch**: The underlying deep learning framework for `sentence-transformers` 
-*   **ultralytics**: Used for object detection within PDFs to identify titles and section headers (YOLOv11s DocLayNet model ≈ 19MB, Ultralytics library ≈ 60MB).
-*   **Pillow**: Used for image processing (part of the integrated 1A processing; library ≈ 3MB).
-*   **onnxruntime**: Used for optimized ONNX model inference (library ≈ 30MB).
+- **Persona & Intent-Aware Ranking:** Concatenates user persona and task intent into semantic vector queries to prioritize sections that matter most to the specific stakeholder (e.g., Financial Risk Analyst vs. Cybersecurity Auditor).
+- **Integrated Layout & Outline Detection (1A Processing):** Leverages a YOLOv11s DocLayNet model to detect page titles, Section-headers, and hierarchy ($H_1, H_2, H_3$) directly from document pixmaps.
+- **Batched Multi-Page Inference:** Executes document layout detection across all pages of a PDF in unified batches, minimizing GPU/CPU context switches.
+- **Resource-Constrained Optimization:** Utilizes `static-similarity-mrl-multilingual-v1`, an embedding model with Matryoshka Representation Learning (MRL) and static embeddings optimized for asymmetric search under constrained CPU and RAM limits.
+- **Deep Subsection Refinement:** Extracts and re-ranks individual paragraphs within top-ranked sections, stripping bullet noise to surface high-signal excerpts.
+- **Dual Runtime Support:**
+  - **Full ML Engine:** YOLOv11 + PyMuPDF + Sentence Transformers inside Docker.
+  - **Instant Local Fallback:** Pure-Python BM25 + PyPDF engine in `app.py` for immediate execution without downloading multi-gigabyte PyTorch binaries.
+
+---
+
+## Architecture & Pipeline
+
+```mermaid
+flowchart TD
+    PDFs["Input PDFs\n(input/PDFs)"] --> LayoutEngine["YOLOv11 DocLayNet\n(Page Layout Analysis)"]
+    PDFs --> TextExtractor["PyMuPDF / Text Extraction"]
+    
+    LayoutEngine --> OutlineGen["In-Memory Outline Generator\n(H1, H2, H3 Detection)"]
+    TextExtractor --> Chunking["Document Section Chunking"]
+    OutlineGen --> Chunking
+    
+    UserIntent["User Intent\n(Persona + Job-to-be-Done)"] --> QueryGen["Semantic Query Formulation"]
+    
+    Chunking --> CorpusEnc["Corpus Embedding\n(MRL Transformer / BM25)"]
+    QueryGen --> QueryEnc["Query Embedding"]
+    
+    CorpusEnc --> DenseSearch["Vector Semantic Search\n(Cosine Similarity Ranking)"]
+    QueryEnc --> DenseSearch
+    
+    DenseSearch --> TopK["Top-K Ranked Sections"]
+    TopK --> SubAnalysis["Subsection Paragraph Refinement\n(Granular Semantic Scoring)"]
+    
+    SubAnalysis --> JSONOut["Final JSON Specification\n(Metadata + Ranked Sections + Excerpts)"]
+    SubAnalysis --> WebUI["Interactive Web UI Dashboard"]
+```
+
+---
 
 ## How to Build and Run
 
-### Prerequisites
-*   Docker installed on your system.
+### Option 1: Interactive Web UI (Instant Local Run)
 
+Run the lightweight web interface on your host machine:
 
-### 1. Build the Docker Image
-Build the Docker image from the project root:
+```bash
+# 1. Start the Flask server
+python app.py
+
+# 2. Open in your browser
+# http://localhost:5000
+```
+
+- Upload one or more PDFs (or click Run to test with the built-in sample financial report).
+- Choose presets (Finance, Cybersecurity, ESG, Strategy) or enter custom roles.
+- Inspect ranked sections, refined paragraphs, and export the output JSON directly.
+
+---
+
+### Option 2: Containerized Batch CLI Pipeline (Docker)
+
+#### 1. Directory Structure
+
+Place your input documents and JSON request into `input/`:
+
+```
+input/
+  input.json         # Challenge input JSON (persona, job, document list)
+  PDFs/              # Directory containing target PDF files
+output/              # Output directory for results
+models/              # Model weights (tracked with Git LFS)
+  yolov11s-doclaynet.pt
+  static-similarity-mrl-multilingual-v1/
+```
+
+#### 2. Build the Docker Image
 
 ```bash
 docker build --platform linux/amd64 -t persona-driven-doc-intel:latest .
 ```
 
+#### 3. Run the Container
 
-### 2. Run the Docker Container
-
-### Expected Input Structure
-
-Before running the pipeline, ensure your input files are organized as follows:
-
-- Place all PDF documents to be processed in the directory: `input/PDFs/`
-- Place your input JSON file (containing persona and job-to-be-done information) at: `input/input.json`
-- Create an empty `output` directory in the project root to store results.
-
-
-Your project directory should look like this:
-
-```
-input/
-  input.json         # The main input JSON file
-  PDFs/              # Directory containing all input PDF files
-models/
-  static-similarity-mrl-multilingual-v1/   # Pre-downloaded SentenceTransformer model (≈ 430MB)
-output/              # Output directory for results
-```
-
-#### Model Storage and Versioning
-
-The model `static-similarity-mrl-multilingual-v1` is stored in the `models/` directory and tracked using [Git Large File Storage (LFS)](https://git-lfs.com/). This helps avoid repeated downloads and keeps the repository size manageable.
-
-> ℹ**Note:** Git LFS is used to version and store this model. If you're cloning this repo, make sure Git LFS is installed to access the model files correctly.
-
-If the model is not present in `models/`, the Docker build will automatically download it as a fallback.
-
-### Running the Docker Container
-
-Run the Docker container, mounting the `input` and `output` directories:
+Run with `--network none` as required for offline evaluation:
 
 ```bash
 docker run --rm \
@@ -82,30 +109,52 @@ docker run --rm \
   -v "$(pwd)"/output:/app/output \
   --network none \
   persona-driven-doc-intel:latest \
-  python process_pdfs_1b.py /app/input/your_input.json /app/output
+  python process_pdfs_1b.py /app/input/input.json /app/output
 ```
 
-**Example for Collection 1:**
+The resulting JSON output (e.g., `challenge1b_output.json`) will be written to `output/`.
 
-First, prepare your input directory. For `round_1b_002`, you would have `challenge1b_input.json` and a `PDFs` subdirectory containing the PDF documents.
+---
 
-```bash
-mkdir -p input/PDFs
-mkdir -p output
-# cp Challenge_1b/documents/challenge1b_input.json input/
-# cp Challenge_1b/documents/PDFs/* input/PDFs/
+## Output JSON Schema
+
+The pipeline produces the standardized output format:
+
+```json
+{
+  "metadata": {
+    "input_documents": ["annual_report_2024.pdf"],
+    "persona": "Financial Risk Analyst",
+    "job_to_be_done": "Evaluate credit facility terms and debt maturities",
+    "processing_timestamp": "2026-11-23T10:14:00"
+  },
+  "extracted_sections": [
+    {
+      "document": "annual_report_2024.pdf",
+      "page_number": 42,
+      "section_title": "Credit Facility and Debt Maturity Schedule",
+      "importance_rank": 1
+    }
+  ],
+  "subsection_analysis": [
+    {
+      "document": "annual_report_2024.pdf",
+      "page_number": 42,
+      "refined_text": "Senior unsecured notes of $800 million are due for final repayment in November 2027. Management anticipates refinancing through long-term term loans..."
+    }
+  ]
+}
 ```
 
-Then run the Docker command:
+---
 
-```bash
-docker run --rm \
-  -v "$(pwd)"/input:/app/input \
-  -v "$(pwd)"/output:/app/output \
-  --network none \
-  persona-driven-doc-intel:latest \
-  python process_pdfs_1b.py /app/input/challenge1b_input.json /app/output
-```
+## Models and Technical Stack
 
-### 3. View Results
-The generated output JSON file (e.g., `round_1b_002_travel_planner_output.json`) will be available in the `output` directory.
+| Component | Technology | Rationale |
+| :--- | :--- | :--- |
+| **Page Layout Detection** | YOLOv11s DocLayNet | High-speed object detection for document layout elements (Titles, Section-headers). |
+| **Text Parsing & Rendering** | PyMuPDF (`fitz`) / `pypdf` | Rapid C-level PDF parsing and page-to-image pixmap rendering. |
+| **Semantic Embeddings** | `static-similarity-mrl-multilingual-v1` | Fast CPU static embeddings using Matryoshka Representation Learning (MRL). |
+| **Ranking & Search** | `sentence-transformers.util.semantic_search` | Scalable cosine similarity matrix multiplication over corpus embeddings. |
+| **Containerization** | Docker (`python:3.10-slim`) | Self-contained, zero-network execution environment for air-gapped reproducibility. |
+| **Web Dashboard** | Flask + Vanilla HTML5/CSS3 | Zero-overhead lightweight UI with live JSON export and preset configurations. |

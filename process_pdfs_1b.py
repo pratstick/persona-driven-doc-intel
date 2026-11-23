@@ -32,13 +32,14 @@ def _combine_text_blocks(text_blocks, min_y=0, max_y=400):
     # Combine lines, preserving order
     return ' '.join(lines)
 
-def _process_yolo_results_for_page(page, yolo_result, model_names):
+def _process_yolo_results_for_page(page, yolo_result, model_names, page_text_blocks=None):
     """
     Processes YOLO results for a single page to extract headings and title.
     """
     page_headings = []
     page_title = ""
-    page_text_blocks = page.get_text("dict")["blocks"]
+    if page_text_blocks is None:
+        page_text_blocks = page.get_text("dict")["blocks"]
 
     for box in yolo_result.boxes:
         class_name = model_names[int(box.cls)]
@@ -71,7 +72,7 @@ def _process_yolo_results_for_page(page, yolo_result, model_names):
                 page_headings.append({
                     "level": "Section-header",
                     "text": detected_text,
-                    "page": page.number,
+                    "page": page.number + 1,
                     "y1": y1,
                     "font_size": font_size,
                     "is_bold": is_bold,
@@ -106,7 +107,6 @@ def process_pdf_1a(pdf_file_path, yolo_model):
     all_headings = []
     model_detected_title = ""
     first_page_text_info = []
-    all_font_sizes = []
 
     page_images = []
     page_text_blocks_list = []
@@ -117,12 +117,11 @@ def process_pdf_1a(pdf_file_path, yolo_model):
         page_images.append(img)
         page_text_blocks_list.append(text_blocks)
         
-        for block in text_blocks:
-            if block['type'] == 0: # Text block
-                for line in block['lines']:
-                    for span in line['spans']:
-                        all_font_sizes.append(span['size'])
-                        if page_num == 0:
+        if page_num == 0:
+            for block in text_blocks:
+                if block['type'] == 0: # Text block
+                    for line in block['lines']:
+                        for span in line['spans']:
                             first_page_text_info.append({
                                 "text": unicodedata.normalize('NFKC', span['text']).strip(),
                                 "bbox": span['bbox'],
@@ -134,46 +133,27 @@ def process_pdf_1a(pdf_file_path, yolo_model):
 
     for page_num, page in enumerate(doc):
         page_yolo_result = yolo_results[page_num]
-        page_headings, page_title = _process_yolo_results_for_page(page, page_yolo_result, yolo_model.names)
+        page_headings, page_title = _process_yolo_results_for_page(
+            page, page_yolo_result, yolo_model.names, page_text_blocks=page_text_blocks_list[page_num]
+        )
         all_headings.extend(page_headings)
         if page_title and not model_detected_title:
             model_detected_title = page_title
 
     all_headings.sort(key=lambda x: (x['page'], x['y1']))
 
-    # Calculate font thresholds
-    if all_font_sizes:
-        unique_font_sizes = sorted(list(set(all_font_sizes)), reverse=True)
-        # Simple heuristic: largest font size is H1, second largest is H2, etc.
-        # This can be made more sophisticated with statistical methods if needed.
-        font_thresholds = {
-            "H1": unique_font_sizes[0] if len(unique_font_sizes) > 0 else 0,
-            "H2": unique_font_sizes[1] if len(unique_font_sizes) > 1 else 0,
-            "H3": unique_font_sizes[2] if len(unique_font_sizes) > 2 else 0,
-        }
-    else:
-        font_thresholds = {"H1": 0, "H2": 0, "H3": 0}
-
-    classified_headings = classify_headings(all_headings, font_thresholds)
+    classified_headings = classify_headings(all_headings)
     final_title = determine_title(classified_headings, model_detected_title, first_page_text_info)
 
     # Clean up temporary attributes used for processing
     for h in classified_headings:
-        if 'y1' in h:
-            del h['y1']
-        if 'font_size' in h:
-            del h['font_size']
-        if 'is_bold' in h:
-            del h['is_bold']
-        if 'x0' in h:
-            del h['x0']
-        if 'text_case' in h:
-            del h['text_case']
+        for attr in ('y1', 'font_size', 'is_bold', 'x0', 'text_case'):
+            h.pop(attr, None)
 
     return {"title": final_title, "outline": classified_headings}
 
 
-def classify_headings(headings, font_thresholds):
+def classify_headings(headings):
     """
     Dynamically assigns heading levels (H1, H2, H3, ...) based on sorted unique stylistic properties.
     Supports more than three heading levels for longer documents.
@@ -244,13 +224,17 @@ def determine_title(headings, model_detected_title, first_page_text_info):
                 return combined_title
     # 3. Fallback to the first H1 heading or the first heading in the document
     if headings:
-        first_page_headings = [h for h in headings if h['page'] == 0]
+        def _heading_rank(h):
+            m = re.search(r'\d+', str(h.get('level', '')))
+            level_num = int(m.group()) if m else 999
+            return (level_num, h.get('y1', 0))
+
+        first_page_headings = [h for h in headings if h.get('page') == 1]
         if first_page_headings:
-            # Sort by heading level (H1, H2, H3, ...), then by y-position
-            first_page_headings.sort(key=lambda x: (int(x['level'][1:]), x['y1']))
+            first_page_headings.sort(key=_heading_rank)
             return first_page_headings[0]['text']
-        headings.sort(key=lambda x: (x['page'], int(x['level'][1:]), x['y1']))
-        return headings[0]['text']
+        headings_sorted = sorted(headings, key=lambda x: (x.get('page', 1), _heading_rank(x)))
+        return headings_sorted[0]['text']
     # 4. Last resort: return the first non-empty text block from the first page
     if first_page_text_info:
         for text_info in first_page_text_info:
@@ -270,18 +254,30 @@ def create_corpus_from_pdfs(pdf_paths, outline_data_map):
             continue
 
         doc = fitz.open(pdf_path)
-        outline = sorted(outline_data.get('outline', []), key=lambda x: x.get('page', 0))
+        outline = sorted(outline_data.get('outline', []), key=lambda x: x.get('page', 1))
 
-        for idx, heading in enumerate(outline):
-            page_num = heading.get('page', 1) - 1
-            if page_num < doc.page_count:
-                section_text = doc.load_page(page_num).get_text()
-                corpus.append({
-                    'doc_name': pdf_name,
-                    'page': heading.get('page', 0),
-                    'section_title': heading.get('text', ''),
-                    'section_text': section_text.strip()
-                })
+        if outline:
+            for heading in outline:
+                page_1based = heading.get('page', 1)
+                page_idx = page_1based - 1
+                if 0 <= page_idx < doc.page_count:
+                    section_text = doc.load_page(page_idx).get_text()
+                    corpus.append({
+                        'doc_name': pdf_name,
+                        'page': page_1based,
+                        'section_title': heading.get('text', ''),
+                        'section_text': section_text.strip()
+                    })
+        else:
+            for page_idx in range(doc.page_count):
+                section_text = doc.load_page(page_idx).get_text().strip()
+                if section_text:
+                    corpus.append({
+                        'doc_name': pdf_name,
+                        'page': page_idx + 1,
+                        'section_title': f"Page {page_idx + 1}",
+                        'section_text': section_text
+                    })
     return corpus
 
 def encode_query_and_corpus(persona, job, corpus, model):
@@ -296,7 +292,13 @@ def encode_query_and_corpus(persona, job, corpus, model):
     return query_embedding, corpus_embeddings
 
 def retrieve_and_rank_sections(query_embedding, corpus_embeddings, corpus, model, top_k=10):
-    hits = util.semantic_search(query_embedding, corpus_embeddings, top_k=top_k)
+    if not corpus or corpus_embeddings is None or len(corpus_embeddings) == 0:
+        return [], []
+
+    k = min(top_k, len(corpus))
+    hits = util.semantic_search(query_embedding, corpus_embeddings, top_k=k)
+    if not hits or not hits[0]:
+        return [], []
     hits = hits[0]  # Get results for the first (and only) query
 
     extracted_sections = []
@@ -394,8 +396,13 @@ if __name__ == "__main__":
         print("No valid PDF documents found to process. Exiting.")
         sys.exit(0)
 
+    BASE_DIR = Path(__file__).resolve().parent
+
     # Load YOLO model for 1A processing
-    yolo_model = load_yolo_model('models/yolov11s-doclaynet.pt')
+    yolo_model_path = BASE_DIR / 'models' / 'yolov11s-doclaynet.pt'
+    if not yolo_model_path.is_file():
+        yolo_model_path = Path('yolov11s-doclaynet.pt')
+    yolo_model = load_yolo_model(str(yolo_model_path))
 
     # Perform 1A processing for all PDFs and store outlines in memory
     outline_data_map = {}
@@ -408,7 +415,11 @@ if __name__ == "__main__":
     corpus = create_corpus_from_pdfs(pdf_files, outline_data_map)
 
     # 2. Semantic Encoding and Model Selection
-    model = SentenceTransformer('/app/models/static-similarity-mrl-multilingual-v1')
+    model_dir = BASE_DIR / 'models' / 'static-similarity-mrl-multilingual-v1'
+    if model_dir.is_dir() and any(model_dir.iterdir()):
+        model = SentenceTransformer(str(model_dir))
+    else:
+        model = SentenceTransformer('sentence-transformers/static-similarity-mrl-multilingual-v1')
     query_embedding, corpus_embeddings = encode_query_and_corpus(persona_role, job_task, corpus, model)
 
     # 3. Retrieval, Ranking, and Sub-Section Analysis
